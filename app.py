@@ -192,22 +192,15 @@ def preberi_narocilnico(stream):
 # ---------------------------------------------------------------------------
 def izracunaj_opozorila(racun_kol, prevzem_kol, racun_cena, narocilo_cena, racun_znesek, narocilo_znesek):
     opozorila = []
-    
-    # 1. Primerjava količin: Zaračunana količina se mora ujemati s prevzemom
     if pd.notna(racun_kol) and pd.notna(prevzem_kol):
         if abs(racun_kol - prevzem_kol) > 0.001:
             opozorila.append(f"KOLIČINA (račun {racun_kol} ≠ prevzem {prevzem_kol})")
-            
-    # 2. Primerjava cen: Zaračunana cena se mora ujemati s ceno iz naročilnice
     if pd.notna(racun_cena) and pd.notna(narocilo_cena) and narocilo_cena > 0:
         if round(racun_cena, 4) != round(narocilo_cena, 4):
             opozorila.append(f"CENA (račun {racun_cena:.4f} ≠ naročilo {narocilo_cena:.4f})")
-            
-    # 3. Preverjanje skupnega zneska
     if pd.notna(racun_znesek) and pd.notna(narocilo_znesek) and narocilo_znesek > 0:
         if round(racun_znesek, 2) != round(narocilo_znesek, 2):
             opozorila.append(f"ZNESEK (račun {racun_znesek:.2f} ≠ naročilo {narocilo_znesek:.2f})")
-            
     return '; '.join(opozorila) if opozorila else 'OK'
 
 def primerjaj(eracun, prevzemnica, narocilnica):
@@ -215,7 +208,6 @@ def primerjaj(eracun, prevzemnica, narocilnica):
     for _, e in eracun.items():
         p = prevzemnica.get(e['sifra_in']) if e['sifra_in'] else None
         if not p: p = poisci_po_imenu(e['naziv'], prevzemnica)
-
         n = narocilnica.get(e['sifra_in']) if e['sifra_in'] else None
         if not n: n = poisci_po_imenu(e['naziv'], narocilnica)
         
@@ -223,7 +215,6 @@ def primerjaj(eracun, prevzemnica, narocilnica):
         if p and p['sifra']: ident = p['sifra']
         elif n and n['sifra']: ident = n['sifra']
 
-        # Pretvorba količin v KOS
         kol_r, enota_r = pretvori_v_osnovno_enoto(e['kolicina'], e['enota'], e['naziv'])
         kol_p, enota_p = pretvori_v_osnovno_enoto(p['kolicina'] if p else 0.0, p['enota'] if p else '', p['naziv'] if p else '')
         kol_n, enota_n = pretvori_v_osnovno_enoto(n['kolicina'] if n else 0.0, n['enota'] if n else '', n['naziv'] if n else '')
@@ -233,14 +224,10 @@ def primerjaj(eracun, prevzemnica, narocilnica):
             m = re.search(r'(?:sc|šk)\s*=\s*(\d+)\s*kos', n['naziv'], re.IGNORECASE)
             if m: cena_n = cena_n / float(m.group(1))
 
-        # KLJUČNA SPREMEMBA: Znesek naročila se izračuna iz PREJETE količine (kol_p), ne naročene!
-        # Če prevzema ni, uporabimo 0.0, da ne vlečemo napačnih podatkov iz naročilnice
         osnova_za_znesek = kol_p if p else 0.0
         znesek_n = round(osnova_za_znesek * cena_n, 2)
         
-        opozorila = izracunaj_opozorila(
-            kol_r, kol_p, e['cena_brez'], cena_n, e['znesek_brez'], znesek_n
-        )
+        opozorila = izracunaj_opozorila(kol_r, kol_p, e['cena_brez'], cena_n, e['znesek_brez'], znesek_n)
         
         rezultati.append({
             'Ident': ident, 
@@ -353,21 +340,17 @@ if 'df_rezultati' in st.session_state:
 
     if not edited_df.equals(df):
         for idx, row in edited_df.iterrows():
-            # Preračunamo znesek naročila iz PREJETE količine
             if pd.notna(row['Kol. prevzem']) and pd.notna(row['Cena naročilo']):
                 edited_df.at[idx, 'Znesek naročilo'] = round(row['Kol. prevzem'] * row['Cena naročilo'], 2)
-            
             edited_df.at[idx, 'Opozorila'] = izracunaj_opozorila(
                 row['Kol. račun'], row['Kol. prevzem'], 
                 row['Cena račun'], row['Cena naročilo'], 
                 row['Znesek račun'], edited_df.at[idx, 'Znesek naročilo']
             )
-
         st.session_state['df_rezultati'] = edited_df
         st.rerun()
 
     st.markdown("##### Predogled barvnega stanja (po morebitnih popravkih):")
-    # Odstranimo stolpce z enotami iz spodnjega prikaza za večjo preglednost
     df_predogled = edited_df.drop(columns=['Em račun', 'Em prevzem', 'Em naročilo', 'Šifra dob.'], errors='ignore')
     st.dataframe(
         df_predogled.style.apply(obarvaj_vrstico, axis=1).format(precision=2, na_rep="-"),
@@ -383,10 +366,19 @@ if 'df_rezultati' in st.session_state:
     col_s1.metric("Skupaj račun (brez DDV)", f"{skupaj_racun:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
     col_s2.metric("Skupaj naročilo (brez DDV)", f"{skupaj_narocilo:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
 
-    df_export = edited_df.drop(columns=['Em račun', 'Em prevzem', 'Em naročilo', 'Šifra dob.'], errors='ignore').copy()
-    df_export.columns = ['Ident', 'Naziv', 'Kol. račun', 'Kol. prevzem', 'Kol. naročilo', 
-                         'Cena račun (EUR)', 'Cena naročilo (EUR)', 'Znesek račun (EUR)', 
-                         'Znesek naročilo (EUR)', 'Opozorila']
+    # Varen izvoz v CSV - brez trdega nastavljanja imen stolpcev
+    df_export = edited_df.copy()
+    
+    # Preimenujemo samo tiste stolpce, ki jih res želimo preimenovati
+    df_export = df_export.rename(columns={
+        'Cena račun': 'Cena račun (EUR)', 
+        'Cena naročilo': 'Cena naročilo (EUR)', 
+        'Znesek račun': 'Znesek račun (EUR)', 
+        'Znesek naročilo': 'Znesek naročilo (EUR)'
+    })
+    
+    # Odstranimo stolpce, ki jih v izvozu ne želimo
+    df_export = df_export.drop(columns=['Em račun', 'Em prevzem', 'Em naročilo', 'Šifra dob.'], errors='ignore')
     
     csv = df_export.to_csv(index=False, sep=';', decimal=',', encoding='utf-8-sig').encode('utf-8-sig')
     st.download_button(
