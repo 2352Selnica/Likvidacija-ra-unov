@@ -183,22 +183,27 @@ def preberi_narocilnico(stream):
 # ---------------------------------------------------------------------------
 # 3. PRIMERJAVA IN PONOVNI IZRAČUN
 # ---------------------------------------------------------------------------
-def izracunaj_opozorila(racun_kol, prevzem_kol, narocilo_kol, racun_cena, narocilo_cena):
+def izracunaj_opozorila(racun_kol, prevzem_kol, narocilo_kol, racun_cena, narocilo_cena, racun_znesek, narocilo_znesek):
     opozorila = []
     
-    # Količina (Račun vs Prevzem)
+    # 1. Preverjanje količin
     if pd.notna(racun_kol) and pd.notna(prevzem_kol):
         if abs(racun_kol - prevzem_kol) > 0.001:
             opozorila.append(f"KOLIČINA (račun {racun_kol} ≠ prevzem {prevzem_kol})")
             
-    # Količina (Račun vs Naročilo)
     if pd.notna(narocilo_kol) and narocilo_kol > 0:
         if pd.notna(racun_kol) and abs(racun_kol - narocilo_kol) > 0.001:
             opozorila.append(f"KOLIČINA (račun {racun_kol} ≠ naročilo {narocilo_kol})")
             
-    # CENA: Primerjamo zaokroženo na 4 decimalke, da se izognemo float napakam
-    if pd.notna(racun_cena) and pd.notna(narocilo_cena) and narocilo_cena > 0:
-        # Zaokrožimo na 4 decimalke in primerjamo
+    # 2. Preverjanje KONČNEGA ZNESKA (najpomembnejše za referenta)
+    if pd.notna(racun_znesek) and pd.notna(narocilo_znesek) and narocilo_znesek > 0:
+        # Primerjamo zaokroženo na 2 decimalki
+        if round(racun_znesek, 2) != round(narocilo_znesek, 2):
+            opozorila.append(f"ZNESEK (račun {racun_znesek:.2f} ≠ naročilo {narocilo_znesek:.2f})")
+            
+    # 3. Preverjanje posamezne cene (samo če se zneska ujemata, a cena je očitno napačna)
+    # To preverjamo le, če znesek ni OK, da ne mešamo referenta po nepotrebnem
+    elif pd.notna(racun_cena) and pd.notna(narocilo_cena) and narocilo_cena > 0:
         r_cena = round(racun_cena, 4)
         n_cena = round(narocilo_cena, 4)
         if r_cena != n_cena:
@@ -221,7 +226,12 @@ def primerjaj(eracun, prevzemnica, narocilnica):
 
         kol_n = n['kolicina'] if n else 0.0
         cena_n = n['cena'] if n else 0.0
-        opozorila = izracunaj_opozorila(e['kolicina'], p['kolicina'] if p else None, kol_n, e['cena_brez'], cena_n)
+        znesek_n = round(kol_n * cena_n, 2)
+        
+        opozorila = izracunaj_opozorila(
+            e['kolicina'], p['kolicina'] if p else None, kol_n, 
+            e['cena_brez'], cena_n, e['znesek_brez'], znesek_n
+        )
         
         rezultati.append({
             'Ident': ident, 
@@ -232,7 +242,7 @@ def primerjaj(eracun, prevzemnica, narocilnica):
             'Cena račun': round(e['cena_brez'], 4), 
             'Cena naročilo': round(cena_n, 4),
             'Znesek račun': round(e['znesek_brez'], 2), 
-            'Znesek naročilo': round(kol_n * cena_n, 2),
+            'Znesek naročilo': znesek_n,
             'Opozorila': opozorila,
         })
     return rezultati
@@ -299,15 +309,13 @@ if 'df_rezultati' in st.session_state:
     c4.metric("Manjkajoče postavke", df['Opozorila'].str.contains('NI V', na=False).sum())
 
     st.subheader("📋 Primerjalna tabela")
-    st.info("💡 Namig: Kliknite na celico v stolpcih **'Kol. naročilo'** ali **'Cena naročilo'**, da ročno vnesete manjkajoče podatke. Izračuni in opozorila se bodo takoj posodobili.")
+    st.info("💡 Namig: Kliknite na celico v stolpcih **'Kol. naročilo'** ali **'Cena naročilo'**, da ročno vnesete manjkajoče podatke. Če se končni znesek ujema, bo vrstica zelena.")
     
-    # Definiramo barvanje
     def obarvaj_vrstico(vrstica):
         if vrstica['Opozorila'] == 'OK':
-            return ['background-color: #d4edda'] * len(vrstica) # Zelena
-        return ['background-color: #f8d7da'] * len(vrstica)     # Rdeča
+            return ['background-color: #d4edda'] * len(vrstica)
+        return ['background-color: #f8d7da'] * len(vrstica)
 
-    # Uporabimo data_editor za urejanje
     edited_df = st.data_editor(
         df,
         column_config={
@@ -327,15 +335,16 @@ if 'df_rezultati' in st.session_state:
         key="editor"
     )
 
-    # Če referent spremeni podatke, jih obdelamo
     if not edited_df.equals(df):
         for idx, row in edited_df.iterrows():
+            # Preračunamo znesek
             if pd.notna(row['Kol. naročilo']) and pd.notna(row['Cena naročilo']):
                 edited_df.at[idx, 'Znesek naročilo'] = round(row['Kol. naročilo'] * row['Cena naročilo'], 2)
             
+            # Ponovno izračunamo opozorila
             edited_df.at[idx, 'Opozorila'] = izracunaj_opozorila(
                 row['Kol. račun'], row['Kol. prevzem'], row['Kol. naročilo'], 
-                row['Cena račun'], row['Cena naročilo']
+                row['Cena račun'], row['Cena naročilo'], row['Znesek račun'], edited_df.at[idx, 'Znesek naročilo']
             )
 
         st.session_state['df_rezultati'] = edited_df
@@ -348,8 +357,29 @@ if 'df_rezultati' in st.session_state:
         hide_index=True
     )
 
-    csv = edited_df.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
-    st.download_button("⬇️ Prenesi rezultat (CSV)", data=csv, file_name="primerjava_racuna.csv", mime="text/csv", use_container_width=True)
+    # Skupni seštevki
+    skupaj_racun = edited_df['Znesek račun'].sum()
+    skupaj_narocilo = edited_df['Znesek naročilo'].sum()
+    
+    st.markdown("### 💰 Skupni seštevki")
+    col_s1, col_s2 = st.columns(2)
+    col_s1.metric("Skupaj račun (brez DDV)", f"{skupaj_racun:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+    col_s2.metric("Skupaj naročilo (brez DDV)", f"{skupaj_narocilo:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
+
+    # Lepši izvoz v CSV (z vejico in prilagojenimi imeni)
+    df_export = edited_df.copy()
+    df_export.columns = ['Ident', 'Naziv', 'Kol. račun', 'Kol. prevzem', 'Kol. naročilo', 
+                         'Cena račun (EUR)', 'Cena naročilo (EUR)', 'Znesek račun (EUR)', 
+                         'Znesek naročilo (EUR)', 'Opozorila']
+    
+    csv = df_export.to_csv(index=False, sep=';', decimal=',', encoding='utf-8-sig').encode('utf-8-sig')
+    st.download_button(
+        label="⬇️ Prenesi rezultat (CSV)",
+        data=csv,
+        file_name="primerjava_racuna.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
 
 st.markdown("---")
 st.subheader("🕒 Zgodovina primerjav")
