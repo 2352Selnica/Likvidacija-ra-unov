@@ -18,7 +18,7 @@ def _f(vrednost, privzeto=0.0):
     except ValueError: return privzeto
 
 def zaokrozi_na_dve(vrednost):
-    """Klasično matematično zaokroževanje na 2 decimalki (11.915 -> 11.92)"""
+    """Matematično zaokroževanje na 2 decimalki (11.915 -> 11.92)"""
     if pd.isna(vrednost): return 0.0
     return float(Decimal(str(vrednost)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
@@ -75,7 +75,7 @@ def preberi_eracun(stream):
         if qty is not None:
             kolicina = _f(qty.findtext('eslog:D_6060', default='0', namespaces=ns))
             enota = qty.findtext('eslog:D_6411', default='KOS', namespaces=ns)
-            if enota == 'H87': enota = 'KOS' # Samo pretvorba kode, brez logike
+            if enota == 'H87': enota = 'KOS'
 
         cena_brez = cena_z = 0.0
         for pri in sg26.findall('eslog:G_SG29/eslog:S_PRI/eslog:C_C509', ns):
@@ -184,17 +184,17 @@ def preberi_narocilnico(stream):
 def izracunaj_opozorila(racun_kol, prevzem_kol, racun_cena, narocilo_cena, racun_znesek, narocilo_znesek):
     opozorila = []
     
-    # Primerjava količin
+    # 1. Primerjava količin
     if pd.notna(racun_kol) and pd.notna(prevzem_kol):
         if abs(racun_kol - prevzem_kol) > 0.001:
             opozorila.append(f"KOLIČINA (račun {racun_kol} ≠ prevzem {prevzem_kol})")
             
-    # Primerjava cen
+    # 2. Primerjava cen
     if pd.notna(racun_cena) and pd.notna(narocilo_cena) and narocilo_cena > 0:
         if abs(racun_cena - narocilo_cena) > 0.0001:
             opozorila.append(f"CENA (račun {racun_cena:.4f} ≠ naročilo {narocilo_cena:.4f})")
             
-    # Primerjava zneskov (zdaj strogo primerjamo zaokroženi vrednosti)
+    # 3. Primerjava zneskov - strogo primerjamo zaokroženi vrednosti
     if pd.notna(racun_znesek) and pd.notna(narocilo_znesek) and narocilo_znesek > 0:
         if zaokrozi_na_dve(racun_znesek) != zaokrozi_na_dve(narocilo_znesek):
             opozorila.append(f"ZNESEK (račun {racun_znesek:.2f} ≠ naročilo {narocilo_znesek:.2f})")
@@ -219,9 +219,9 @@ def primerjaj(eracun, prevzemnica, narocilnica):
 
         cena_n = n['cena'] if n else 0.0
         
-        # Znesek naročila izračunamo iz prejete količine in cene iz naročilnice
+        # KLJUČNO: Znesek naročila se izračuna iz PREJETE količine
         osnova_za_znesek = kol_p if p else 0.0
-        znesek_n = round(osnova_za_znesek * cena_n, 2)
+        znesek_n = osnova_za_znesek * cena_n
         
         opozorila = izracunaj_opozorila(kol_r, kol_p, e['cena_brez'], cena_n, e['znesek_brez'], znesek_n)
         
@@ -237,8 +237,8 @@ def primerjaj(eracun, prevzemnica, narocilnica):
             'Kol. naročilo': round(kol_n, 2), 
             'Cena račun': round(e['cena_brez'], 4), 
             'Cena naročilo': round(cena_n, 4),
-            'Znesek račun': round(e['znesek_brez'], 2), 
-            'Znesek naročilo': znesek_n,
+            'Znesek račun': zaokrozi_na_dve(e['znesek_brez']), 
+            'Znesek naročilo': zaokrozi_na_dve(znesek_n),
             'Opozorila': opozorila,
         })
     return rezultati
@@ -337,7 +337,7 @@ if 'df_rezultati' in st.session_state:
     if not edited_df.equals(df):
         for idx, row in edited_df.iterrows():
             if pd.notna(row['Kol. prevzem']) and pd.notna(row['Cena naročilo']):
-                edited_df.at[idx, 'Znesek naročilo'] = round(row['Kol. prevzem'] * row['Cena naročilo'], 2)
+                edited_df.at[idx, 'Znesek naročilo'] = zaokrozi_na_dve(row['Kol. prevzem'] * row['Cena naročilo'])
             edited_df.at[idx, 'Opozorila'] = izracunaj_opozorila(
                 row['Kol. račun'], row['Kol. prevzem'], 
                 row['Cena račun'], row['Cena naročilo'], 
