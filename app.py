@@ -194,7 +194,7 @@ def izracunaj_opozorila(racun_kol, prevzem_kol, narocilo_kol, racun_cena, naroci
             opozorila.append(f"KOLIČINA (račun {racun_kol} ≠ naročilo {narocilo_kol})")
             
     if pd.notna(racun_cena) and pd.notna(narocilo_cena) and narocilo_cena > 0:
-        if abs(racun_cena - narocilo_cena) > 0.01:
+        if abs(racun_cena - narocilo_cena) > 0.001: # Toleranca 0.001 za 3 decimalke
             opozorila.append(f"CENA (račun {racun_cena:.4f} ≠ naročilo {narocilo_cena:.4f})")
             
     return '; '.join(opozorila) if opozorila else 'OK'
@@ -223,7 +223,7 @@ def primerjaj(eracun, prevzemnica, narocilnica):
             'Kol. prevzem': p['kolicina'] if p else None, 
             'Kol. naročilo': kol_n, 
             'Cena račun': round(e['cena_brez'], 4), 
-            'Cena naročilo': cena_n,
+            'Cena naročilo': round(cena_n, 4),
             'Znesek račun': round(e['znesek_brez'], 2), 
             'Znesek naročilo': round(kol_n * cena_n, 2),
             'Opozorila': opozorila,
@@ -310,7 +310,7 @@ if 'df_rezultati' in st.session_state:
             "Kol. prevzem": st.column_config.NumberColumn("Kol. prevzem", format="%.2f", disabled=True),
             "Kol. naročilo": st.column_config.NumberColumn("Kol. naročilo", format="%.2f", step=1.0), # Omogočeno urejanje
             "Cena račun": st.column_config.NumberColumn("Cena račun", format="%.4f", disabled=True),
-            "Cena naročilo": st.column_config.NumberColumn("Cena naročilo", format="%.4f", step=0.01), # Omogočeno urejanje
+            "Cena naročilo": st.column_config.NumberColumn("Cena naročilo", format="%.4f", step=0.0001), # 4 decimalke + korak
             "Znesek račun": st.column_config.NumberColumn("Znesek račun", format="%.2f", disabled=True),
             "Znesek naročilo": st.column_config.NumberColumn("Znesek naročilo", format="%.2f", disabled=True),
             "Opozorila": st.column_config.TextColumn("Opozorila", width="medium", disabled=True),
@@ -323,7 +323,7 @@ if 'df_rezultati' in st.session_state:
     # Če referent spremeni podatke, jih obdelamo
     if not edited_df.equals(df):
         for idx, row in edited_df.iterrows():
-            # Preračunamo znesek
+            # Preračunamo znesek z visoko natančnostjo
             if pd.notna(row['Kol. naročilo']) and pd.notna(row['Cena naročilo']):
                 edited_df.at[idx, 'Znesek naročilo'] = round(row['Kol. naročilo'] * row['Cena naročilo'], 2)
             
@@ -336,10 +336,7 @@ if 'df_rezultati' in st.session_state:
         st.session_state['df_rezultati'] = edited_df
         st.rerun() # Osveži, da se prikažejo nove barve in izračuni
 
-    # Barvanje in prikaz tabele
-    # Ker st.data_editor ne podpira .style neposredno, uporabimo trik z css in Styler objektom prek pandas
-    # Opomba: Streamlit bo v prihodnosti morda podpiral style v data_editor.
-    # Za zdaj prikažemo barvno tabelo pod editorjem, da referent vidi končno stanje.
+    # Barvni predogled
     st.markdown("##### Predogled barvnega stanja (po morebitnih popravkih):")
     st.dataframe(
         edited_df.style.apply(obarvaj_vrstico, axis=1).format(precision=2, na_rep="-"),
