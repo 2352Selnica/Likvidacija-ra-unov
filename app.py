@@ -185,17 +185,24 @@ def preberi_narocilnico(stream):
 # ---------------------------------------------------------------------------
 def izracunaj_opozorila(racun_kol, prevzem_kol, narocilo_kol, racun_cena, narocilo_cena):
     opozorila = []
+    
+    # Količina (Račun vs Prevzem)
     if pd.notna(racun_kol) and pd.notna(prevzem_kol):
         if abs(racun_kol - prevzem_kol) > 0.001:
             opozorila.append(f"KOLIČINA (račun {racun_kol} ≠ prevzem {prevzem_kol})")
             
+    # Količina (Račun vs Naročilo)
     if pd.notna(narocilo_kol) and narocilo_kol > 0:
         if pd.notna(racun_kol) and abs(racun_kol - narocilo_kol) > 0.001:
             opozorila.append(f"KOLIČINA (račun {racun_kol} ≠ naročilo {narocilo_kol})")
             
+    # CENA: Primerjamo zaokroženo na 4 decimalke, da se izognemo float napakam
     if pd.notna(racun_cena) and pd.notna(narocilo_cena) and narocilo_cena > 0:
-        if abs(racun_cena - narocilo_cena) > 0.001: # Toleranca 0.001 za 3 decimalke
-            opozorila.append(f"CENA (račun {racun_cena:.4f} ≠ naročilo {narocilo_cena:.4f})")
+        # Zaokrožimo na 4 decimalke in primerjamo
+        r_cena = round(racun_cena, 4)
+        n_cena = round(narocilo_cena, 4)
+        if r_cena != n_cena:
+            opozorila.append(f"CENA (račun {r_cena:.4f} ≠ naročilo {n_cena:.4f})")
             
     return '; '.join(opozorila) if opozorila else 'OK'
 
@@ -308,9 +315,9 @@ if 'df_rezultati' in st.session_state:
             "Naziv": st.column_config.TextColumn("Naziv", width="large", disabled=True),
             "Kol. račun": st.column_config.NumberColumn("Kol. račun", format="%.2f", disabled=True),
             "Kol. prevzem": st.column_config.NumberColumn("Kol. prevzem", format="%.2f", disabled=True),
-            "Kol. naročilo": st.column_config.NumberColumn("Kol. naročilo", format="%.2f", step=1.0), # Omogočeno urejanje
+            "Kol. naročilo": st.column_config.NumberColumn("Kol. naročilo", format="%.2f", step=1.0), 
             "Cena račun": st.column_config.NumberColumn("Cena račun", format="%.4f", disabled=True),
-            "Cena naročilo": st.column_config.NumberColumn("Cena naročilo", format="%.4f", step=0.0001), # 4 decimalke + korak
+            "Cena naročilo": st.column_config.NumberColumn("Cena naročilo", format="%.4f", step=0.0001), 
             "Znesek račun": st.column_config.NumberColumn("Znesek račun", format="%.2f", disabled=True),
             "Znesek naročilo": st.column_config.NumberColumn("Znesek naročilo", format="%.2f", disabled=True),
             "Opozorila": st.column_config.TextColumn("Opozorila", width="medium", disabled=True),
@@ -323,20 +330,17 @@ if 'df_rezultati' in st.session_state:
     # Če referent spremeni podatke, jih obdelamo
     if not edited_df.equals(df):
         for idx, row in edited_df.iterrows():
-            # Preračunamo znesek z visoko natančnostjo
             if pd.notna(row['Kol. naročilo']) and pd.notna(row['Cena naročilo']):
                 edited_df.at[idx, 'Znesek naročilo'] = round(row['Kol. naročilo'] * row['Cena naročilo'], 2)
             
-            # Ponovno izračunamo opozorila
             edited_df.at[idx, 'Opozorila'] = izracunaj_opozorila(
                 row['Kol. račun'], row['Kol. prevzem'], row['Kol. naročilo'], 
                 row['Cena račun'], row['Cena naročilo']
             )
 
         st.session_state['df_rezultati'] = edited_df
-        st.rerun() # Osveži, da se prikažejo nove barve in izračuni
+        st.rerun()
 
-    # Barvni predogled
     st.markdown("##### Predogled barvnega stanja (po morebitnih popravkih):")
     st.dataframe(
         edited_df.style.apply(obarvaj_vrstico, axis=1).format(precision=2, na_rep="-"),
@@ -344,7 +348,6 @@ if 'df_rezultati' in st.session_state:
         hide_index=True
     )
 
-    # Prenos
     csv = edited_df.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
     st.download_button("⬇️ Prenesi rezultat (CSV)", data=csv, file_name="primerjava_racuna.csv", mime="text/csv", use_container_width=True)
 
