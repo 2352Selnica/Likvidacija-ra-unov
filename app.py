@@ -7,12 +7,11 @@ import io
 import pdfplumber
 
 # ---------------------------------------------------------------------------
-# 1. LOGIKA
+# 1. POMOŽNE FUNKCIJE
 # ---------------------------------------------------------------------------
 def _f(vrednost, privzeto=0.0):
     if vrednost is None:
         return privzeto
-    # Odstranimo morebitne presledke, zamenjamo vejico s piko
     vrednost = str(vrednost).strip().replace(' ', '').replace(',', '.')
     try:
         return float(vrednost)
@@ -20,10 +19,42 @@ def _f(vrednost, privzeto=0.0):
         return privzeto
 
 def normaliziraj_naziv(n):
-    n = (n or '').lower()
+    """Poenostavi naziv za boljše ujemanje (odstrani ločila, naredi male črke)."""
+    if not n: return ""
+    n = n.lower()
     n = re.sub(r'[^a-z0-9]+', ' ', n)
     return ' '.join(n.split())
 
+def poisci_po_imenu(ciljni_naziv, slovar_postavk):
+    """Poišče postavko v slovarju, ki se najbolje ujema z ciljnim nazivom."""
+    if not ciljni_naziv: return None
+    norm_cilj = normaliziraj_naziv(ciljni_naziv)
+    
+    # 1. Poskusimo najprej z direktnim ujemanjem normaliziranega imena
+    for k, v in slovar_postavk.items():
+        if normaliziraj_naziv(v['naziv']) == norm_cilj:
+            return v
+            
+    # 2. Če direktnega ni, poskusimo po ključnih besedah (npr. samo prva beseda)
+    ciljne_besede = set(norm_cilj.split())
+    najboljse_ujemanje = None
+    najvec_besed = 0
+    
+    for k, v in slovar_postavk.items():
+        norm_v = normaliziraj_naziv(v['naziv'])
+        v_besede = set(norm_v.split())
+        skupne = ciljne_besede.intersection(v_besede)
+        # Če se ujema vsaj ena ključna beseda (dolžine vsaj 4 črke)
+        kljucne_ujemajoce = [b for b in skupne if len(b) >= 4]
+        if len(kljucne_ujemajoce) > najvec_besed:
+            najvec_besed = len(kljucne_ujemajoce)
+            najboljse_ujemanje = v
+            
+    return najboljse_ujemanje if najvec_besed >= 1 else None
+
+# ---------------------------------------------------------------------------
+# 2. BRANJE DATOTEK
+# ---------------------------------------------------------------------------
 def preberi_eracun(stream):
     ns = {'eslog': 'urn:eslog:2.00'}
     tree = ET.parse(stream)
@@ -75,7 +106,6 @@ def preberi_eracun(stream):
     return postavke
 
 def preberi_prevzemnico_pdf(stream):
-    """Bere PDF prevzemnice in izlušči postavke."""
     postavke = {}
     with pdfplumber.open(stream) as pdf:
         vse_besedilo = ""
@@ -84,13 +114,10 @@ def preberi_prevzemnico_pdf(stream):
             if text:
                 vse_besedilo += text + "\n"
     
-    # Ker je PDF tabela malo zapletena, uporabimo regex za iskanje vrstic s postavkami
-    # Vzorec išče: zaporedna št., šifra (npr. 724036), naziv, KOS, količina, cena, vrednost
     vrstice = vse_besedilo.split('\n')
     i = 0
     while i < len(vrstice):
         vrstica = vrstice[i]
-        # Preverimo, ali vrstica vsebuje šifro in KOS (začetek postavke)
         m = re.search(r'^(\d+)\s+(\d{6})\s+(.+?)\s+KOS\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)', vrstica)
         if m:
             sifra = m.group(2)
@@ -99,33 +126,48 @@ def preberi_prevzemnico_pdf(stream):
             cena = _f(m.group(5))
             vrednost = _f(m.group(6))
             
-            # Preberemo še naslednjo vrstico, kjer so popusti, ddv in cena brez ddv
             if i + 1 < len(vrstice):
                 naslednja = vrstice[i+1]
-                # V naslednji vrstici so podatki: konto, cena_brez_ddv, ddv, odbitek, vred_odbitka, vred_ddv
-                # Primer: "310000 4,828000 9,50 1,00 0,0226 2,26"
                 m2 = re.search(r'^\d+\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)', naslednja)
                 if m2:
                     cena_brez = _f(m2.group(1))
                     ddv = _f(m2.group(2))
-                    popust = _f(m2.group(3))  # odstotek
+                    popust = _f(m2.group(3))
                 else:
-                    cena_brez = 0.0
-                    ddv = 0.0
-                    popust = 0.0
+                    cena_brez, ddv, popust = 0.0, 0.0, 0.0
             else:
-                cena_brez = 0.0
-                ddv = 0.0
-                popust = 0.0
+                cena_brez, ddv, popust = 0.0, 0.0, 0.0
                 
             postavke[sifra] = {
                 'sifra': sifra, 'naziv': naziv,
                 'kolicina': kolicina, 'cena_brez': cena_brez, 'cena_z': cena,
-                'popust': popust, 'ddv': ddv, 'znesek_brez': vrednost, 'znesek_z': vrednost, # približek
+                'popust': popust, 'ddv': ddv, 'znesek_brez': vrednost, 'znesek_z': vrednost,
             }
-            # Preskočimo naslednjo vrstico, ker smo jo že obdelali
             i += 1
         i += 1
+    return postavke
+
+def preberi_prevzemnico_xml(stream):
+    vsebina = stream.read()
+    if isinstance(vsebina, bytes):
+        vsebina = vsebina.decode('utf-8', errors='replace')
+    vsebina_ociscena = vsebina.replace('$', '_')
+    stream_ociscen = io.BytesIO(vsebina_ociscena.encode('utf-8'))
+    tree = ET.parse(stream_ociscen)
+    root = tree.getroot()
+    postavke = {}
+    for post in root.findall('.//CG_G_POST'):
+        sifra = post.findtext('ART_S_ARTIKLA', default='').strip()
+        postavke[sifra] = {
+            'sifra': sifra, 'naziv': post.findtext('ART_N_ARTIKLA', default='').strip(),
+            'kolicina': _f(post.findtext('POST_KOLICINA', default='0')),
+            'cena_brez': _f(post.findtext('CF_CENA_BREZ_DDV', default='0')),
+            'cena_z': _f(post.findtext('CF_CENA_Z_DDV', default='0')),
+            'popust': _f(post.findtext('RABAT_DOB', default='0')),
+            'ddv': _f(post.findtext('POST_O_PDAVKA', default='0')),
+            'znesek_brez': _f(post.findtext('POST_VR_BREZ_DDV', default='0')),
+            'znesek_z': _f(post.findtext('POST_VR_Z_DDV', default='0')),
+        }
     return postavke
 
 def preberi_narocilnico(stream):
@@ -144,36 +186,49 @@ def preberi_narocilnico(stream):
         }
     return postavke
 
+# ---------------------------------------------------------------------------
+# 3. PRIMERJAVA
+# ---------------------------------------------------------------------------
 def primerjaj(eracun, prevzemnica, narocilnica):
     rezultati = []
-    prevz_naziv = {normaliziraj_naziv(v['naziv']): k for k, v in prevzemnica.items()}
-    nar_naziv = {normaliziraj_naziv(v['naziv']): k for k, v in narocilnica.items()}
+    
     for _, e in eracun.items():
+        # Povezovanje s prevzemnico
         p = None
-        if e['sifra_in'] and e['sifra_in'] in prevzemnica: p = prevzemnica[e['sifra_in']]
-        elif e['sifra_sa'] and e['sifra_sa'] in prevzemnica: p = prevzemnica[e['sifra_sa']]
+        if e['sifra_in'] and e['sifra_in'] in prevzemnica: 
+            p = prevzemnica[e['sifra_in']]
         else:
-            nk = normaliziraj_naziv(e['naziv'])
-            if nk in prevz_naziv: p = prevzemnica[prevz_naziv[nk]]
+            # Če šifra ne dela, poskusimo po imenu
+            p = poisci_po_imenu(e['naziv'], prevzemnica)
+
+        # Povezovanje z naročilnico
         n = None
-        if e['sifra_in'] and e['sifra_in'] in narocilnica: n = narocilnica[e['sifra_in']]
-        elif e['sifra_sa'] and e['sifra_sa'] in narocilnica: n = narocilnica[e['sifra_sa']]
+        if e['sifra_in'] and e['sifra_in'] in narocilnica: 
+            n = narocilnica[e['sifra_in']]
         else:
-            nk = normaliziraj_naziv(e['naziv'])
-            if nk in nar_naziv: n = narocilnica[nar_naziv[nk]]
+            n = poisci_po_imenu(e['naziv'], narocilnica)
         
         opozorila = []
-        if p is None: opozorila.append('NI V PREVZEMNICI')
+        
+        # Primerjava s prevzemnico
+        if p is None: 
+            opozorila.append('NI V PREVZEMNICI')
         else:
-            if abs(e['kolicina'] - p['kolicina']) > 0.001: opozorila.append(f"KOLIČINA (račun {e['kolicina']} ≠ prevzem {p['kolicina']})")
-            # Preverjamo ceno brez DDV
-            if abs(e['cena_brez'] - p['cena_brez']) > 0.01: opozorila.append(f"CENA BREZ DDV (račun {e['cena_brez']:.4f} ≠ prevzem {p['cena_brez']:.4f})")
-            if abs(e['popust'] - p['popust']) > 0.01: opozorila.append(f"POPUST (račun {e['popust']} ≠ prevzem {p['popust']})")
-            if abs(e['znesek_brez'] - p['znesek_brez']) > 0.01: opozorila.append(f"ZNESEK BREZ DDV (račun {e['znesek_brez']} ≠ prevzem {p['znesek_brez']})")
-        if n is None: opozorila.append('NI V NAROČILNICI')
+            if abs(e['kolicina'] - p['kolicina']) > 0.001: 
+                opozorila.append(f"KOLIČINA (račun {e['kolicina']} ≠ prevzem {p['kolicina']})")
+            if abs(e['cena_brez'] - p['cena_brez']) > 0.01: 
+                opozorila.append(f"CENA BREZ DDV (račun {e['cena_brez']:.4f} ≠ prevzem {p['cena_brez']:.4f})")
+            if abs(e['znesek_brez'] - p['znesek_brez']) > 0.01: 
+                opozorila.append(f"ZNESEK (račun {e['znesek_brez']:.2f} ≠ prevzem {p['znesek_brez']:.2f})")
+        
+        # Primerjava z naročilnico
+        if n is None: 
+            opozorila.append('NI V NAROČILNICI')
         else:
-            if abs(e['kolicina'] - n['kolicina']) > 0.001: opozorila.append(f"KOLIČINA (račun {e['kolicina']} ≠ naročilo {n['kolicina']})")
-            if abs(e['cena_brez'] - n['cena']) > 0.01: opozorila.append(f"CENA (račun {e['cena_brez']:.4f} ≠ naročilo {n['cena']:.4f})")
+            if abs(e['kolicina'] - n['kolicina']) > 0.001: 
+                opozorila.append(f"KOLIČINA (račun {e['kolicina']} ≠ naročilo {n['kolicina']})")
+            if abs(e['cena_brez'] - n['cena']) > 0.01: 
+                opozorila.append(f"CENA (račun {e['cena_brez']:.4f} ≠ naročilo {n['cena']:.4f})")
         
         rezultati.append({
             'Šifra (interna)': e['sifra_in'], 'Šifra (dobavitelj)': e['sifra_sa'], 'Naziv': e['naziv'],
@@ -185,7 +240,7 @@ def primerjaj(eracun, prevzemnica, narocilnica):
     return rezultati
 
 # ---------------------------------------------------------------------------
-# 2. STREAMLIT VMESNIK
+# 4. STREAMLIT VMESNIK
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="Primerjava računa", page_icon="📑", layout="wide")
 st.title("📑 Primerjava eRačuna, prevzemnice in naročilnice")
@@ -205,32 +260,10 @@ if st.button("🔍 Primerjaj", type="primary", use_container_width=True):
         with st.spinner("Berem in primerjam ..."):
             eracun = preberi_eracun(f_eracun)
             
-            # Preverimo, ali je prevzemnica PDF ali XML
             if f_prevzemnica.name.lower().endswith('.pdf'):
                 prevzemnica = preberi_prevzemnico_pdf(f_prevzemnica)
             else:
-                # Za XML uporabimo prejšnjo logiko (vključno z zamenjavo $)
-                vsebina = f_prevzemnica.read()
-                if isinstance(vsebina, bytes):
-                    vsebina = vsebina.decode('utf-8', errors='replace')
-                vsebina_ociscena = vsebina.replace('$', '_')
-                stream_ociscen = io.BytesIO(vsebina_ociscena.encode('utf-8'))
-                
-                tree = ET.parse(stream_ociscen)
-                root = tree.getroot()
-                prevzemnica = {}
-                for post in root.findall('.//CG_G_POST'):
-                    sifra = post.findtext('ART_S_ARTIKLA', default='').strip()
-                    prevzemnica[sifra] = {
-                        'sifra': sifra, 'naziv': post.findtext('ART_N_ARTIKLA', default='').strip(),
-                        'kolicina': _f(post.findtext('POST_KOLICINA', default='0')),
-                        'cena_brez': _f(post.findtext('CF_CENA_BREZ_DDV', default='0')),
-                        'cena_z': _f(post.findtext('CF_CENA_Z_DDV', default='0')),
-                        'popust': _f(post.findtext('RABAT_DOB', default='0')),
-                        'ddv': _f(post.findtext('POST_O_PDAVKA', default='0')),
-                        'znesek_brez': _f(post.findtext('POST_VR_BREZ_DDV', default='0')),
-                        'znesek_z': _f(post.findtext('POST_VR_Z_DDV', default='0')),
-                    }
+                prevzemnica = preberi_prevzemnico_xml(f_prevzemnica)
             
             narocilnica = preberi_narocilnico(f_narocilnica)
             rezultati = primerjaj(eracun, prevzemnica, narocilnica)
