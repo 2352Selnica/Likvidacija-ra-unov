@@ -28,15 +28,12 @@ def normaliziraj_naziv(n):
 def poisci_po_imenu(ciljni_naziv, slovar_postavk):
     if not ciljni_naziv: return None
     norm_cilj = normaliziraj_naziv(ciljni_naziv)
-    
     for k, v in slovar_postavk.items():
         if normaliziraj_naziv(v['naziv']) == norm_cilj:
             return v
-            
     ciljne_besede = set(norm_cilj.split())
     najboljse_ujemanje = None
     najvec_besed = 0
-    
     for k, v in slovar_postavk.items():
         norm_v = normaliziraj_naziv(v['naziv'])
         v_besede = set(norm_v.split())
@@ -45,8 +42,22 @@ def poisci_po_imenu(ciljni_naziv, slovar_postavk):
         if len(kljucne_ujemajoce) > najvec_besed:
             najvec_besed = len(kljucne_ujemajoce)
             najboljse_ujemanje = v
-            
     return najboljse_ujemanje if najvec_besed >= 1 else None
+
+def pretvori_v_osnovno_enoto(kolicina, enota, naziv):
+    """Pretvori količino v osnovno enoto (KOS), če je v nazivu naveden faktor (npr. sc=5kos)."""
+    if pd.isna(kolicina): return 0.0, "KOS"
+    
+    enota = str(enota).upper()
+    if enota in ['SC', 'ŠK', 'SK']:
+        # Poiščemo faktor v nazivu (npr. "sc=5kos", "sc= 5 kos", "5 kos")
+        m = re.search(r'(?:sc|šk)\s*=\s*(\d+)\s*kos', str(naziv), re.IGNORECASE)
+        if m:
+            faktor = float(m.group(1))
+            return kolicina * faktor, "KOS"
+        else:
+            return kolicina, enota
+    return kolicina, enota
 
 # ---------------------------------------------------------------------------
 # 2. BRANJE DATOTEK
@@ -69,10 +80,18 @@ def preberi_eracun(stream):
         imd = sg26.find('eslog:S_IMD', ns)
         if imd is not None:
             naziv = imd.findtext('eslog:C_C273/eslog:D_7008', default='', namespaces=ns)
+        
         kolicina = 0.0
+        enota = 'KOS'
         qty = sg26.find('eslog:S_QTY/eslog:C_C186', ns)
         if qty is not None:
             kolicina = _f(qty.findtext('eslog:D_6060', default='0', namespaces=ns))
+            enota = qty.findtext('eslog:D_6411', default='KOS', namespaces=ns)
+            # V eRačunu je pogosto enota H87 (kar pomeni KOS), vendar nas zanima, ali je v nazivu SC
+            if enota == 'H87': 
+                if 'sc=' in naziv.lower(): enota = 'SC'
+                else: enota = 'KOS'
+
         cena_brez = cena_z = 0.0
         for pri in sg26.findall('eslog:G_SG29/eslog:S_PRI/eslog:C_C509', ns):
             tip = pri.findtext('eslog:D_5125', default='', namespaces=ns)
@@ -96,7 +115,7 @@ def preberi_eracun(stream):
         kljuc = sifra_in or sifra_sa or naziv
         postavke[kljuc] = {
             'sifra_sa': sifra_sa, 'sifra_in': sifra_in, 'naziv': naziv,
-            'kolicina': kolicina, 'cena_brez': cena_brez, 'cena_z': cena_z,
+            'kolicina': kolicina, 'enota': enota, 'cena_brez': cena_brez, 'cena_z': cena_z,
             'popust': popust, 'ddv': ddv, 'znesek_brez': znesek_brez, 'znesek_z': znesek_z,
         }
     return postavke
@@ -107,8 +126,7 @@ def preberi_prevzemnico_pdf(stream):
         vse_besedilo = ""
         for page in pdf.pages:
             text = page.extract_text()
-            if text:
-                vse_besedilo += text + "\n"
+            if text: vse_besedilo += text + "\n"
     
     vrstice = vse_besedilo.split('\n')
     i = 0
@@ -130,9 +148,8 @@ def preberi_prevzemnico_pdf(stream):
                     cena_brez = _f(m2.group(1))
                     ddv = _f(m2.group(2))
                     popust = _f(m2.group(3))
-                
             postavke[sifra] = {
-                'sifra': sifra, 'naziv': naziv,
+                'sifra': sifra, 'naziv': naziv, 'enota': 'KOS',
                 'kolicina': kolicina, 'cena_brez': cena_brez, 'cena_z': cena,
                 'popust': popust, 'ddv': ddv, 'znesek_brez': vrednost, 'znesek_z': vrednost,
             }
@@ -142,8 +159,7 @@ def preberi_prevzemnico_pdf(stream):
 
 def preberi_prevzemnico_xml(stream):
     vsebina = stream.read()
-    if isinstance(vsebina, bytes):
-        vsebina = vsebina.decode('utf-8', errors='replace')
+    if isinstance(vsebina, bytes): vsebina = vsebina.decode('utf-8', errors='replace')
     vsebina_ociscena = vsebina.replace('$', '_')
     stream_ociscen = io.BytesIO(vsebina_ociscena.encode('utf-8'))
     tree = ET.parse(stream_ociscen)
@@ -152,7 +168,7 @@ def preberi_prevzemnico_xml(stream):
     for post in root.findall('.//CG_G_POST'):
         sifra = post.findtext('ART_S_ARTIKLA', default='').strip()
         postavke[sifra] = {
-            'sifra': sifra, 'naziv': post.findtext('ART_N_ARTIKLA', default='').strip(),
+            'sifra': sifra, 'naziv': post.findtext('ART_N_ARTIKLA', default='').strip(), 'enota': 'KOS',
             'kolicina': _f(post.findtext('POST_KOLICINA', default='0')),
             'cena_brez': _f(post.findtext('CF_CENA_BREZ_DDV', default='0')),
             'cena_z': _f(post.findtext('CF_CENA_Z_DDV', default='0')),
@@ -166,27 +182,27 @@ def preberi_prevzemnico_xml(stream):
 def preberi_narocilnico(stream):
     postavke = {}
     vsebina = stream.read()
-    if isinstance(vsebina, bytes):
-        vsebina = vsebina.decode('utf-8', errors='replace')
+    if isinstance(vsebina, bytes): vsebina = vsebina.decode('utf-8', errors='replace')
     for vrstica in vsebina.splitlines():
         if not vrstica.strip(): continue
+        # Zajamemo tudi enoto (KOS ali SC)
         m = re.match(r'^\s*\d+\s+([0-9A-Za-z]+)\s+(.+?)\s+(\d+)\s*(KOS|SC)\s+([\d.,]+)', vrstica, re.IGNORECASE)
-        if not m: 
-            continue
+        if not m: continue
         sifra = m.group(1).strip()
         postavke[sifra] = {
             'sifra': sifra, 'naziv': m.group(2).strip(),
-            'kolicina': _f(m.group(3)), 'cena': _f(m.group(5)),
+            'kolicina': _f(m.group(3)), 'enota': m.group(4).upper(),
+            'cena': _f(m.group(5)),
         }
     return postavke
 
 # ---------------------------------------------------------------------------
 # 3. PRIMERJAVA IN PONOVNI IZRAČUN
 # ---------------------------------------------------------------------------
-def izracunaj_opozorila(racun_kol, prevzem_kol, narocilo_kol, racun_cena, narocilo_cena, racun_znesek, narocilo_znesek):
+def izracunaj_opozorila(racun_kol, prevzem_kol, narocilo_kol, racun_znesek, narocilo_znesek):
     opozorila = []
     
-    # 1. Preverjanje količin
+    # 1. Preverjanje količin (sedaj obe količini pretvorjeni v KOS)
     if pd.notna(racun_kol) and pd.notna(prevzem_kol):
         if abs(racun_kol - prevzem_kol) > 0.001:
             opozorila.append(f"KOLIČINA (račun {racun_kol} ≠ prevzem {prevzem_kol})")
@@ -195,19 +211,10 @@ def izracunaj_opozorila(racun_kol, prevzem_kol, narocilo_kol, racun_cena, naroci
         if pd.notna(racun_kol) and abs(racun_kol - narocilo_kol) > 0.001:
             opozorila.append(f"KOLIČINA (račun {racun_kol} ≠ naročilo {narocilo_kol})")
             
-    # 2. Preverjanje KONČNEGA ZNESKA (najpomembnejše za referenta)
+    # 2. Preverjanje KONČNEGA ZNESKA (primerjamo na 2 decimalki, da se izognemo float napakam)
     if pd.notna(racun_znesek) and pd.notna(narocilo_znesek) and narocilo_znesek > 0:
-        # Primerjamo zaokroženo na 2 decimalki
         if round(racun_znesek, 2) != round(narocilo_znesek, 2):
             opozorila.append(f"ZNESEK (račun {racun_znesek:.2f} ≠ naročilo {narocilo_znesek:.2f})")
-            
-    # 3. Preverjanje posamezne cene (samo če se zneska ujemata, a cena je očitno napačna)
-    # To preverjamo le, če znesek ni OK, da ne mešamo referenta po nepotrebnem
-    elif pd.notna(racun_cena) and pd.notna(narocilo_cena) and narocilo_cena > 0:
-        r_cena = round(racun_cena, 4)
-        n_cena = round(narocilo_cena, 4)
-        if r_cena != n_cena:
-            opozorila.append(f"CENA (račun {r_cena:.4f} ≠ naročilo {n_cena:.4f})")
             
     return '; '.join(opozorila) if opozorila else 'OK'
 
@@ -224,21 +231,31 @@ def primerjaj(eracun, prevzemnica, narocilnica):
         if p and p['sifra']: ident = p['sifra']
         elif n and n['sifra']: ident = n['sifra']
 
-        kol_n = n['kolicina'] if n else 0.0
+        # Pretvorba enot v KOS
+        kol_r, enota_r = pretvori_v_osnovno_enoto(e['kolicina'], e['enota'], e['naziv'])
+        kol_p, enota_p = pretvori_v_osnovno_enoto(p['kolicina'] if p else 0.0, p['enota'] if p else '', p['naziv'] if p else '')
+        kol_n, enota_n = pretvori_v_osnovno_enoto(n['kolicina'] if n else 0.0, n['enota'] if n else '', n['naziv'] if n else '')
+
         cena_n = n['cena'] if n else 0.0
+        
+        # Če je naročilnica v kosih, cena pa je podana za škatlico (SC), moramo ceno pretvoriti na kos
+        if n and n['enota'] in ['SC', 'ŠK']:
+            m = re.search(r'(?:sc|šk)\s*=\s*(\d+)\s*kos', n['naziv'], re.IGNORECASE)
+            if m:
+                cena_n = cena_n / float(m.group(1))
+
         znesek_n = round(kol_n * cena_n, 2)
         
-        opozorila = izracunaj_opozorila(
-            e['kolicina'], p['kolicina'] if p else None, kol_n, 
-            e['cena_brez'], cena_n, e['znesek_brez'], znesek_n
-        )
+        opozorila = izracunaj_opozorila(kol_r, kol_p, kol_n, e['znesek_brez'], znesek_n)
         
         rezultati.append({
             'Ident': ident, 
             'Naziv': e['naziv'],
-            'Kol. račun': e['kolicina'], 
-            'Kol. prevzem': p['kolicina'] if p else None, 
-            'Kol. naročilo': kol_n, 
+            'Enota': e['enota'], # Prikaz originalne enote iz računa
+            'Šifra dob.': e['sifra_sa'], # Prikaz šifre dobavitelja
+            'Kol. račun': round(kol_r, 2), 
+            'Kol. prevzem': round(kol_p, 2) if p else None, 
+            'Kol. naročilo': round(kol_n, 2), 
             'Cena račun': round(e['cena_brez'], 4), 
             'Cena naročilo': round(cena_n, 4),
             'Znesek račun': round(e['znesek_brez'], 2), 
@@ -309,18 +326,22 @@ if 'df_rezultati' in st.session_state:
     c4.metric("Manjkajoče postavke", df['Opozorila'].str.contains('NI V', na=False).sum())
 
     st.subheader("📋 Primerjalna tabela")
-    st.info("💡 Namig: Kliknite na celico v stolpcih **'Kol. naročilo'** ali **'Cena naročilo'**, da ročno vnesete manjkajoče podatke. Če se končni znesek ujema, bo vrstica zelena.")
+    st.info("💡 Namig: Kliknite na celico v stolpcih **'Kol. naročilo'** ali **'Cena naročilo'**, da ročno vnesete manjkajoče podatke. Izračuni in opozorila se bodo takoj posodobili.")
     
+    # Definiramo barvanje za spodnjo tabelo
     def obarvaj_vrstico(vrstica):
         if vrstica['Opozorila'] == 'OK':
             return ['background-color: #d4edda'] * len(vrstica)
         return ['background-color: #f8d7da'] * len(vrstica)
 
+    # Uporabimo data_editor za urejanje (dodana Enota in Šifra dob.)
     edited_df = st.data_editor(
         df,
         column_config={
             "Ident": st.column_config.TextColumn("Ident", disabled=True),
             "Naziv": st.column_config.TextColumn("Naziv", width="large", disabled=True),
+            "Enota": st.column_config.TextColumn("Enota", disabled=True),
+            "Šifra dob.": st.column_config.TextColumn("Šifra dob.", disabled=True),
             "Kol. račun": st.column_config.NumberColumn("Kol. račun", format="%.2f", disabled=True),
             "Kol. prevzem": st.column_config.NumberColumn("Kol. prevzem", format="%.2f", disabled=True),
             "Kol. naročilo": st.column_config.NumberColumn("Kol. naročilo", format="%.2f", step=1.0), 
@@ -337,22 +358,24 @@ if 'df_rezultati' in st.session_state:
 
     if not edited_df.equals(df):
         for idx, row in edited_df.iterrows():
-            # Preračunamo znesek
+            # Preračunamo znesek, če je referent vpisal količino in ceno
             if pd.notna(row['Kol. naročilo']) and pd.notna(row['Cena naročilo']):
                 edited_df.at[idx, 'Znesek naročilo'] = round(row['Kol. naročilo'] * row['Cena naročilo'], 2)
             
             # Ponovno izračunamo opozorila
             edited_df.at[idx, 'Opozorila'] = izracunaj_opozorila(
                 row['Kol. račun'], row['Kol. prevzem'], row['Kol. naročilo'], 
-                row['Cena račun'], row['Cena naročilo'], row['Znesek račun'], edited_df.at[idx, 'Znesek naročilo']
+                row['Znesek račun'], edited_df.at[idx, 'Znesek naročilo']
             )
 
         st.session_state['df_rezultati'] = edited_df
         st.rerun()
 
     st.markdown("##### Predogled barvnega stanja (po morebitnih popravkih):")
+    # Za spodnjo tabelo odstranimo stolpca Enota in Šifra dob.
+    df_predogled = edited_df.drop(columns=['Enota', 'Šifra dob.'])
     st.dataframe(
-        edited_df.style.apply(obarvaj_vrstico, axis=1).format(precision=2, na_rep="-"),
+        df_predogled.style.apply(obarvaj_vrstico, axis=1).format(precision=2, na_rep="-"),
         use_container_width=True,
         hide_index=True
     )
@@ -366,8 +389,8 @@ if 'df_rezultati' in st.session_state:
     col_s1.metric("Skupaj račun (brez DDV)", f"{skupaj_racun:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
     col_s2.metric("Skupaj naročilo (brez DDV)", f"{skupaj_narocilo:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
 
-    # Lepši izvoz v CSV (z vejico in prilagojenimi imeni)
-    df_export = edited_df.copy()
+    # Lepši izvoz v CSV
+    df_export = edited_df.drop(columns=['Enota', 'Šifra dob.']).copy()
     df_export.columns = ['Ident', 'Naziv', 'Kol. račun', 'Kol. prevzem', 'Kol. naročilo', 
                          'Cena račun (EUR)', 'Cena naročilo (EUR)', 'Znesek račun (EUR)', 
                          'Znesek naročilo (EUR)', 'Opozorila']
