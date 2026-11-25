@@ -193,18 +193,17 @@ def preberi_narocilnico(stream):
 def izracunaj_opozorila(racun_kol, prevzem_kol, racun_cena, narocilo_cena, racun_znesek, narocilo_znesek):
     opozorila = []
     
-    # 1. Primerjava količin: Zaračunana količina se mora ujemati s prevzemom!
+    # 1. Primerjava količin: Zaračunana količina se mora ujemati s prevzemom
     if pd.notna(racun_kol) and pd.notna(prevzem_kol):
         if abs(racun_kol - prevzem_kol) > 0.001:
             opozorila.append(f"KOLIČINA (račun {racun_kol} ≠ prevzem {prevzem_kol})")
             
-    # 2. Primerjava cen: Zaračunana cena se mora ujemati s pogodbeno (naročilnica)
+    # 2. Primerjava cen: Zaračunana cena se mora ujemati s ceno iz naročilnice
     if pd.notna(racun_cena) and pd.notna(narocilo_cena) and narocilo_cena > 0:
-        # Zaokrožimo na 4 decimalke za natančno primerjavo
         if round(racun_cena, 4) != round(narocilo_cena, 4):
             opozorila.append(f"CENA (račun {racun_cena:.4f} ≠ naročilo {narocilo_cena:.4f})")
             
-    # 3. Preverjanje skupnega zneska (kot dodatna varnost)
+    # 3. Preverjanje skupnega zneska
     if pd.notna(racun_znesek) and pd.notna(narocilo_znesek) and narocilo_znesek > 0:
         if round(racun_znesek, 2) != round(narocilo_znesek, 2):
             opozorila.append(f"ZNESEK (račun {racun_znesek:.2f} ≠ naročilo {narocilo_znesek:.2f})")
@@ -224,17 +223,20 @@ def primerjaj(eracun, prevzemnica, narocilnica):
         if p and p['sifra']: ident = p['sifra']
         elif n and n['sifra']: ident = n['sifra']
 
-        kol_r, _ = pretvori_v_osnovno_enoto(e['kolicina'], e['enota'], e['naziv'])
-        kol_p, _ = pretvori_v_osnovno_enoto(p['kolicina'] if p else 0.0, p['enota'] if p else '', p['naziv'] if p else '')
-        kol_n, _ = pretvori_v_osnovno_enoto(n['kolicina'] if n else 0.0, n['enota'] if n else '', n['naziv'] if n else '')
+        # Pretvorba količin v KOS
+        kol_r, enota_r = pretvori_v_osnovno_enoto(e['kolicina'], e['enota'], e['naziv'])
+        kol_p, enota_p = pretvori_v_osnovno_enoto(p['kolicina'] if p else 0.0, p['enota'] if p else '', p['naziv'] if p else '')
+        kol_n, enota_n = pretvori_v_osnovno_enoto(n['kolicina'] if n else 0.0, n['enota'] if n else '', n['naziv'] if n else '')
 
-        # Cena na kos (preračunano iz naročilnice, če je ta podala ceno za SC)
         cena_n = n['cena'] if n else 0.0
         if n and n['enota'] in ['SC', 'ŠK']:
             m = re.search(r'(?:sc|šk)\s*=\s*(\d+)\s*kos', n['naziv'], re.IGNORECASE)
             if m: cena_n = cena_n / float(m.group(1))
 
-        znesek_n = round(kol_n * cena_n, 2)
+        # KLJUČNA SPREMEMBA: Znesek naročila se izračuna iz PREJETE količine (kol_p), ne naročene!
+        # Če prevzema ni, uporabimo 0.0, da ne vlečemo napačnih podatkov iz naročilnice
+        osnova_za_znesek = kol_p if p else 0.0
+        znesek_n = round(osnova_za_znesek * cena_n, 2)
         
         opozorila = izracunaj_opozorila(
             kol_r, kol_p, e['cena_brez'], cena_n, e['znesek_brez'], znesek_n
@@ -242,11 +244,13 @@ def primerjaj(eracun, prevzemnica, narocilnica):
         
         rezultati.append({
             'Ident': ident, 
-            'Naziv': e['naziv'],
-            'Enota': e['enota'],
             'Šifra dob.': e['sifra_sa'],
+            'Naziv': e['naziv'],
+            'Em račun': e['enota'],
             'Kol. račun': round(kol_r, 2), 
+            'Em prevzem': p['enota'] if p else '',
             'Kol. prevzem': round(kol_p, 2) if p else None, 
+            'Em naročilo': n['enota'] if n else '',
             'Kol. naročilo': round(kol_n, 2), 
             'Cena račun': round(e['cena_brez'], 4), 
             'Cena naročilo': round(cena_n, 4),
@@ -319,24 +323,23 @@ if 'df_rezultati' in st.session_state:
     st.subheader("📋 Primerjalna tabela")
     st.info("💡 Namig: Kliknite na celico v stolpcu **'Cena naročilo'**, da ročno popravite ceno. Če se bo cena ujemala z računom, bo opozorilo izginilo.")
     
-    # Definiramo barvanje
     def obarvaj_vrstico(vrstica):
         if vrstica['Opozorila'] == 'OK':
             return ['background-color: #d4edda'] * len(vrstica)
         return ['background-color: #f8d7da'] * len(vrstica)
 
-    # Uporabimo data_editor za urejanje
-    # Razvrščanje (sort) onemogočimo, da ohranimo enak vrstni red kot spodaj
     edited_df = st.data_editor(
         df,
         column_config={
             "Ident": st.column_config.TextColumn("Ident", disabled=True),
-            "Naziv": st.column_config.TextColumn("Naziv", width="large", disabled=True),
-            "Enota": st.column_config.TextColumn("Enota", disabled=True),
             "Šifra dob.": st.column_config.TextColumn("Šifra dob.", disabled=True),
+            "Naziv": st.column_config.TextColumn("Naziv", width="large", disabled=True),
+            "Em račun": st.column_config.TextColumn("Em račun", disabled=True),
             "Kol. račun": st.column_config.NumberColumn("Kol. račun", format="%.2f", disabled=True),
+            "Em prevzem": st.column_config.TextColumn("Em prevzem", disabled=True),
             "Kol. prevzem": st.column_config.NumberColumn("Kol. prevzem", format="%.2f", disabled=True),
-            "Kol. naročilo": st.column_config.NumberColumn("Kol. naročilo", format="%.2f", disabled=True), # Onemogočeno urejanje
+            "Em naročilo": st.column_config.TextColumn("Em naročilo", disabled=True),
+            "Kol. naročilo": st.column_config.NumberColumn("Kol. naročilo", format="%.2f", disabled=True), 
             "Cena račun": st.column_config.NumberColumn("Cena račun", format="%.4f", disabled=True),
             "Cena naročilo": st.column_config.NumberColumn("Cena naročilo", format="%.4f", step=0.0001), 
             "Znesek račun": st.column_config.NumberColumn("Znesek račun", format="%.2f", disabled=True),
@@ -348,14 +351,12 @@ if 'df_rezultati' in st.session_state:
         key="editor"
     )
 
-    # Če referent spremeni ceno, posodobimo izračune
     if not edited_df.equals(df):
         for idx, row in edited_df.iterrows():
-            # Preračunamo znesek
-            if pd.notna(row['Kol. račun']) and pd.notna(row['Cena naročilo']):
-                edited_df.at[idx, 'Znesek naročilo'] = round(row['Kol. račun'] * row['Cena naročilo'], 2)
+            # Preračunamo znesek naročila iz PREJETE količine
+            if pd.notna(row['Kol. prevzem']) and pd.notna(row['Cena naročilo']):
+                edited_df.at[idx, 'Znesek naročilo'] = round(row['Kol. prevzem'] * row['Cena naročilo'], 2)
             
-            # Ponovno izračunamo opozorila
             edited_df.at[idx, 'Opozorila'] = izracunaj_opozorila(
                 row['Kol. račun'], row['Kol. prevzem'], 
                 row['Cena račun'], row['Cena naročilo'], 
@@ -366,14 +367,14 @@ if 'df_rezultati' in st.session_state:
         st.rerun()
 
     st.markdown("##### Predogled barvnega stanja (po morebitnih popravkih):")
-    df_predogled = edited_df.drop(columns=['Enota', 'Šifra dob.'], errors='ignore')
+    # Odstranimo stolpce z enotami iz spodnjega prikaza za večjo preglednost
+    df_predogled = edited_df.drop(columns=['Em račun', 'Em prevzem', 'Em naročilo', 'Šifra dob.'], errors='ignore')
     st.dataframe(
         df_predogled.style.apply(obarvaj_vrstico, axis=1).format(precision=2, na_rep="-"),
         use_container_width=True,
         hide_index=True
     )
 
-    # Skupni seštevki
     skupaj_racun = edited_df['Znesek račun'].sum()
     skupaj_narocilo = edited_df['Znesek naročilo'].sum()
     
@@ -382,8 +383,7 @@ if 'df_rezultati' in st.session_state:
     col_s1.metric("Skupaj račun (brez DDV)", f"{skupaj_racun:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
     col_s2.metric("Skupaj naročilo (brez DDV)", f"{skupaj_narocilo:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
 
-    # Izvoz v CSV
-    df_export = edited_df.drop(columns=['Enota', 'Šifra dob.'], errors='ignore').copy()
+    df_export = edited_df.drop(columns=['Em račun', 'Em prevzem', 'Em naročilo', 'Šifra dob.'], errors='ignore').copy()
     df_export.columns = ['Ident', 'Naziv', 'Kol. račun', 'Kol. prevzem', 'Kol. naročilo', 
                          'Cena račun (EUR)', 'Cena naročilo (EUR)', 'Znesek račun (EUR)', 
                          'Znesek naročilo (EUR)', 'Opozorila']
