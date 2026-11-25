@@ -1,7 +1,2 @@
-streamlit
-pandas
-openpyxl
-pdfplumber
-pdf2image
-pytesseract
-Pillow
+streamlit>=1.30
+pandas>=2.0
