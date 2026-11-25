@@ -19,23 +19,21 @@ def _f(vrednost, privzeto=0.0):
         return privzeto
 
 def normaliziraj_naziv(n):
-    """Poenostavi naziv za boljše ujemanje (odstrani ločila, naredi male črke)."""
     if not n: return ""
     n = n.lower()
     n = re.sub(r'[^a-z0-9]+', ' ', n)
     return ' '.join(n.split())
 
 def poisci_po_imenu(ciljni_naziv, slovar_postavk):
-    """Poišče postavko v slovarju, ki se najbolje ujema z ciljnim nazivom."""
     if not ciljni_naziv: return None
     norm_cilj = normaliziraj_naziv(ciljni_naziv)
     
-    # 1. Poskusimo najprej z direktnim ujemanjem normaliziranega imena
+    # 1. Direktno ujemanje
     for k, v in slovar_postavk.items():
         if normaliziraj_naziv(v['naziv']) == norm_cilj:
             return v
             
-    # 2. Če direktnega ni, poskusimo po ključnih besedah (npr. samo prva beseda)
+    # 2. Ujemanje po ključnih besedah
     ciljne_besede = set(norm_cilj.split())
     najboljse_ujemanje = None
     najvec_besed = 0
@@ -44,7 +42,6 @@ def poisci_po_imenu(ciljni_naziv, slovar_postavk):
         norm_v = normaliziraj_naziv(v['naziv'])
         v_besede = set(norm_v.split())
         skupne = ciljne_besede.intersection(v_besede)
-        # Če se ujema vsaj ena ključna beseda (dolžine vsaj 4 črke)
         kljucne_ujemajoce = [b for b in skupne if len(b) >= 4]
         if len(kljucne_ujemajoce) > najvec_besed:
             najvec_besed = len(kljucne_ujemajoce)
@@ -118,6 +115,7 @@ def preberi_prevzemnico_pdf(stream):
     i = 0
     while i < len(vrstice):
         vrstica = vrstice[i]
+        # Preberemo vrstico s postavko
         m = re.search(r'^(\d+)\s+(\d{6})\s+(.+?)\s+KOS\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)', vrstica)
         if m:
             sifra = m.group(2)
@@ -126,6 +124,7 @@ def preberi_prevzemnico_pdf(stream):
             cena = _f(m.group(5))
             vrednost = _f(m.group(6))
             
+            cena_brez, ddv, popust = 0.0, 0.0, 0.0
             if i + 1 < len(vrstice):
                 naslednja = vrstice[i+1]
                 m2 = re.search(r'^\d+\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)', naslednja)
@@ -133,10 +132,6 @@ def preberi_prevzemnico_pdf(stream):
                     cena_brez = _f(m2.group(1))
                     ddv = _f(m2.group(2))
                     popust = _f(m2.group(3))
-                else:
-                    cena_brez, ddv, popust = 0.0, 0.0, 0.0
-            else:
-                cena_brez, ddv, popust = 0.0, 0.0, 0.0
                 
             postavke[sifra] = {
                 'sifra': sifra, 'naziv': naziv,
@@ -177,8 +172,11 @@ def preberi_narocilnico(stream):
         vsebina = vsebina.decode('utf-8', errors='replace')
     for vrstica in vsebina.splitlines():
         if not vrstica.strip(): continue
-        m = re.match(r'^\s*\d+\s+([0-9A-Za-z]+)\s+(.+?)\s+(\d+(?:[.,]\d+)?)\s*(KOS|SC)\s+(\d+(?:[.,]\d+)?)', vrstica)
-        if not m: continue
+        # POPRAVLJEN REGEX: bolj toleranten na presledke in formate
+        # Išče: zap. št., šifra, naziv, količina (npr. 5KOS ali 5 KOS ali 5SC)
+        m = re.match(r'^\s*\d+\s+([0-9A-Za-z]+)\s+(.+?)\s+(\d+)\s*(KOS|SC)\s+([\d.,]+)', vrstica, re.IGNORECASE)
+        if not m: 
+            continue
         sifra = m.group(1).strip()
         postavke[sifra] = {
             'sifra': sifra, 'naziv': m.group(2).strip(),
@@ -193,48 +191,52 @@ def primerjaj(eracun, prevzemnica, narocilnica):
     rezultati = []
     
     for _, e in eracun.items():
-        # Povezovanje s prevzemnico
         p = None
         if e['sifra_in'] and e['sifra_in'] in prevzemnica: 
             p = prevzemnica[e['sifra_in']]
         else:
-            # Če šifra ne dela, poskusimo po imenu
             p = poisci_po_imenu(e['naziv'], prevzemnica)
 
-        # Povezovanje z naročilnico
         n = None
         if e['sifra_in'] and e['sifra_in'] in narocilnica: 
             n = narocilnica[e['sifra_in']]
         else:
             n = poisci_po_imenu(e['naziv'], narocilnica)
         
+        # Določimo končni ID (interna šifra naročnika)
+        ident = e['sifra_in']
+        if p and p['sifra']: ident = p['sifra']
+        elif n and n['sifra']: ident = n['sifra']
+
         opozorila = []
         
-        # Primerjava s prevzemnico
+        # Primerjava količin (Račun vs Prevzem)
         if p is None: 
             opozorila.append('NI V PREVZEMNICI')
         else:
             if abs(e['kolicina'] - p['kolicina']) > 0.001: 
                 opozorila.append(f"KOLIČINA (račun {e['kolicina']} ≠ prevzem {p['kolicina']})")
-            if abs(e['cena_brez'] - p['cena_brez']) > 0.01: 
-                opozorila.append(f"CENA BREZ DDV (račun {e['cena_brez']:.4f} ≠ prevzem {p['cena_brez']:.4f})")
-            if abs(e['znesek_brez'] - p['znesek_brez']) > 0.01: 
-                opozorila.append(f"ZNESEK (račun {e['znesek_brez']:.2f} ≠ prevzem {p['znesek_brez']:.2f})")
         
-        # Primerjava z naročilnico
+        # Primerjava s naročilnico (Cena in Znesek)
         if n is None: 
             opozorila.append('NI V NAROČILNICI')
         else:
             if abs(e['kolicina'] - n['kolicina']) > 0.001: 
                 opozorila.append(f"KOLIČINA (račun {e['kolicina']} ≠ naročilo {n['kolicina']})")
+            # Opomba: cena v naročilnici je ponavadi cena brez DDV
             if abs(e['cena_brez'] - n['cena']) > 0.01: 
                 opozorila.append(f"CENA (račun {e['cena_brez']:.4f} ≠ naročilo {n['cena']:.4f})")
         
         rezultati.append({
-            'Šifra (interna)': e['sifra_in'], 'Šifra (dobavitelj)': e['sifra_sa'], 'Naziv': e['naziv'],
-            'Kol. račun': e['kolicina'], 'Kol. prevzem': p['kolicina'] if p else None, 'Kol. naročilo': n['kolicina'] if n else None,
-            'Cena račun': round(e['cena_brez'], 4), 'Cena prevzem': round(p['cena_brez'], 4) if p else None, 'Cena naročilo': round(n['cena'], 4) if n else None,
-            'Znesek račun': round(e['znesek_brez'], 2), 'Znesek prevzem': round(p['znesek_brez'], 2) if p else None,
+            'Ident': ident, 
+            'Naziv': e['naziv'],
+            'Kol. račun': e['kolicina'], 
+            'Kol. prevzem': p['kolicina'] if p else None, 
+            'Kol. naročilo': n['kolicina'] if n else None,
+            'Cena račun': round(e['cena_brez'], 4), 
+            'Cena naročilo': round(n['cena'], 4) if n else None,
+            'Znesek račun': round(e['znesek_brez'], 2), 
+            'Znesek naročilo': round(n['kolicina'] * n['cena'], 2) if n else None,
             'Opozorila': '; '.join(opozorila) if opozorila else 'OK',
         })
     return rezultati
@@ -246,12 +248,27 @@ st.set_page_config(page_title="Primerjava računa", page_icon="📑", layout="wi
 st.title("📑 Primerjava eRačuna, prevzemnice in naročilnice")
 st.caption("Naložite tri datoteke – aplikacija samodejno poveže postavke in prikaže morebitna odstopanja.")
 
-col1, col2, col3 = st.columns(3)
-with col1: f_eracun = st.file_uploader("1) eRačun (XML, eSLOG)", type=["xml"])
-with col2: f_prevzemnica = st.file_uploader("2) Prevzemnica (XML ali PDF)", type=["xml", "pdf"])
-with col3: f_narocilnica = st.file_uploader("3) Naročilnica (TXT)", type=["txt"])
+# Bolj pregledna postavitev vnosnih polj (v ozadjih)
+with st.container(border=True):
+    st.markdown("### 📂 Vnos podatkov")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("**1. eRačun**")
+        f_eracun = st.file_uploader("Naložite eRačun (XML, eSLOG)", type=["xml"], label_visibility="collapsed")
+        
+    with col2:
+        st.markdown("**2. Prevzemnica**")
+        f_prevzemnica = st.file_uploader("Naložite prevzemnico (XML ali PDF)", type=["xml", "pdf"], label_visibility="collapsed")
+        
+    with col3:
+        st.markdown("**3. Naročilnica**")
+        f_narocilnica = st.file_uploader("Naložite naročilnico (TXT)", type=["txt"], label_visibility="collapsed")
 
-if st.button("🔍 Primerjaj", type="primary", use_container_width=True):
+st.markdown("---")
+
+# Gumb za primerjavo
+if st.button("🔍 Zaženi primerjavo", type="primary", use_container_width=True):
     if not (f_eracun and f_prevzemnica and f_narocilnica):
         st.warning("Prosimo, naložite vse tri datoteke.")
         st.stop()
@@ -269,6 +286,7 @@ if st.button("🔍 Primerjaj", type="primary", use_container_width=True):
             rezultati = primerjaj(eracun, prevzemnica, narocilnica)
 
         df = pd.DataFrame(rezultati)
+        
         st.subheader("📊 Povzetek")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Postavk na računu", len(df))
@@ -282,10 +300,21 @@ if st.button("🔍 Primerjaj", type="primary", use_container_width=True):
             return ['background-color: #f8d7da'] * len(vrstica)
 
         st.subheader("📋 Primerjalna tabela")
-        st.dataframe(df.style.apply(obarvaj, axis=1), use_container_width=True, hide_index=True)
+        # Prikaz tabele z uporabo st.dataframe z boljšim formatiranjem
+        st.dataframe(
+            df.style.apply(obarvaj, axis=1).format(precision=2, na_rep="-"), 
+            use_container_width=True, 
+            hide_index=True
+        )
 
         csv = df.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
-        st.download_button("⬇️ Prenesi rezultat (CSV)", data=csv, file_name="primerjava_racuna.csv", mime="text/csv", use_container_width=True)
+        st.download_button(
+            label="⬇️ Prenesi rezultat (CSV)",
+            data=csv,
+            file_name="primerjava_racuna.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
 
     except Exception as e:
         st.error(f"Napaka pri obdelavi: {e}")
