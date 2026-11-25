@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import re
 import io
 import pdfplumber
+from datetime import datetime
 
 # ---------------------------------------------------------------------------
 # 1. POMOŽNE FUNKCIJE
@@ -28,12 +29,10 @@ def poisci_po_imenu(ciljni_naziv, slovar_postavk):
     if not ciljni_naziv: return None
     norm_cilj = normaliziraj_naziv(ciljni_naziv)
     
-    # 1. Direktno ujemanje
     for k, v in slovar_postavk.items():
         if normaliziraj_naziv(v['naziv']) == norm_cilj:
             return v
             
-    # 2. Ujemanje po ključnih besedah
     ciljne_besede = set(norm_cilj.split())
     najboljse_ujemanje = None
     najvec_besed = 0
@@ -115,7 +114,6 @@ def preberi_prevzemnico_pdf(stream):
     i = 0
     while i < len(vrstice):
         vrstica = vrstice[i]
-        # Preberemo vrstico s postavko
         m = re.search(r'^(\d+)\s+(\d{6})\s+(.+?)\s+KOS\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)', vrstica)
         if m:
             sifra = m.group(2)
@@ -172,8 +170,6 @@ def preberi_narocilnico(stream):
         vsebina = vsebina.decode('utf-8', errors='replace')
     for vrstica in vsebina.splitlines():
         if not vrstica.strip(): continue
-        # POPRAVLJEN REGEX: bolj toleranten na presledke in formate
-        # Išče: zap. št., šifra, naziv, količina (npr. 5KOS ali 5 KOS ali 5SC)
         m = re.match(r'^\s*\d+\s+([0-9A-Za-z]+)\s+(.+?)\s+(\d+)\s*(KOS|SC)\s+([\d.,]+)', vrstica, re.IGNORECASE)
         if not m: 
             continue
@@ -203,27 +199,23 @@ def primerjaj(eracun, prevzemnica, narocilnica):
         else:
             n = poisci_po_imenu(e['naziv'], narocilnica)
         
-        # Določimo končni ID (interna šifra naročnika)
         ident = e['sifra_in']
         if p and p['sifra']: ident = p['sifra']
         elif n and n['sifra']: ident = n['sifra']
 
         opozorila = []
         
-        # Primerjava količin (Račun vs Prevzem)
         if p is None: 
             opozorila.append('NI V PREVZEMNICI')
         else:
             if abs(e['kolicina'] - p['kolicina']) > 0.001: 
                 opozorila.append(f"KOLIČINA (račun {e['kolicina']} ≠ prevzem {p['kolicina']})")
         
-        # Primerjava s naročilnico (Cena in Znesek)
         if n is None: 
             opozorila.append('NI V NAROČILNICI')
         else:
             if abs(e['kolicina'] - n['kolicina']) > 0.001: 
                 opozorila.append(f"KOLIČINA (račun {e['kolicina']} ≠ naročilo {n['kolicina']})")
-            # Opomba: cena v naročilnici je ponavadi cena brez DDV
             if abs(e['cena_brez'] - n['cena']) > 0.01: 
                 opozorila.append(f"CENA (račun {e['cena_brez']:.4f} ≠ naročilo {n['cena']:.4f})")
         
@@ -232,11 +224,11 @@ def primerjaj(eracun, prevzemnica, narocilnica):
             'Naziv': e['naziv'],
             'Kol. račun': e['kolicina'], 
             'Kol. prevzem': p['kolicina'] if p else None, 
-            'Kol. naročilo': n['kolicina'] if n else None,
+            'Kol. naročilo': n['kolicina'] if n else 0.0, # 0.0 namesto None za lažje urejanje
             'Cena račun': round(e['cena_brez'], 4), 
-            'Cena naročilo': round(n['cena'], 4) if n else None,
+            'Cena naročilo': round(n['cena'], 4) if n else 0.0,
             'Znesek račun': round(e['znesek_brez'], 2), 
-            'Znesek naročilo': round(n['kolicina'] * n['cena'], 2) if n else None,
+            'Znesek naročilo': round(n['kolicina'] * n['cena'], 2) if n else 0.0,
             'Opozorila': '; '.join(opozorila) if opozorila else 'OK',
         })
     return rezultati
@@ -248,7 +240,10 @@ st.set_page_config(page_title="Primerjava računa", page_icon="📑", layout="wi
 st.title("📑 Primerjava eRačuna, prevzemnice in naročilnice")
 st.caption("Naložite tri datoteke – aplikacija samodejno poveže postavke in prikaže morebitna odstopanja.")
 
-# Bolj pregledna postavitev vnosnih polj (v ozadjih)
+# Inicializacija zgodovine v seji
+if 'zgodovina' not in st.session_state:
+    st.session_state['zgodovina'] = []
+
 with st.container(border=True):
     st.markdown("### 📂 Vnos podatkov")
     col1, col2, col3 = st.columns(3)
@@ -267,7 +262,6 @@ with st.container(border=True):
 
 st.markdown("---")
 
-# Gumb za primerjavo
 if st.button("🔍 Zaženi primerjavo", type="primary", use_container_width=True):
     if not (f_eracun and f_prevzemnica and f_narocilnica):
         st.warning("Prosimo, naložite vse tri datoteke.")
@@ -284,38 +278,106 @@ if st.button("🔍 Zaženi primerjavo", type="primary", use_container_width=True
             
             narocilnica = preberi_narocilnico(f_narocilnica)
             rezultati = primerjaj(eracun, prevzemnica, narocilnica)
-
-        df = pd.DataFrame(rezultati)
-        
-        st.subheader("📊 Povzetek")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Postavk na računu", len(df))
-        c2.metric("Brez opozoril", (df['Opozorila'] == 'OK').sum())
-        c3.metric("Z opozorili", (df['Opozorila'] != 'OK').sum())
-        c4.metric("Manjkajoče postavke", df['Opozorila'].str.contains('NI V', na=False).sum())
-
-        def obarvaj(vrstica):
-            if vrstica['Opozorila'] == 'OK':
-                return ['background-color: #d4edda'] * len(vrstica)
-            return ['background-color: #f8d7da'] * len(vrstica)
-
-        st.subheader("📋 Primerjalna tabela")
-        # Prikaz tabele z uporabo st.dataframe z boljšim formatiranjem
-        st.dataframe(
-            df.style.apply(obarvaj, axis=1).format(precision=2, na_rep="-"), 
-            use_container_width=True, 
-            hide_index=True
-        )
-
-        csv = df.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
-        st.download_button(
-            label="⬇️ Prenesi rezultat (CSV)",
-            data=csv,
-            file_name="primerjava_racuna.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+            
+            # Shranimo v session_state, da lahko urejamo
+            st.session_state['df_rezultati'] = pd.DataFrame(rezultati)
+            
+            # Zabeležimo v zgodovino
+            cas = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+            sestevek_racun = sum([r['Znesek račun'] for r in rezultati])
+            st.session_state['zgodovina'].append({
+                "Čas": cas,
+                "Št. postavk": len(rezultati),
+                "Skupaj račun (brez DDV)": f"{sestevek_racun:.2f} €",
+                "Opozorila": sum([1 for r in rezultati if r['Opozorila'] != 'OK'])
+            })
 
     except Exception as e:
         st.error(f"Napaka pri obdelavi: {e}")
         st.exception(e)
+
+# Prikaz rezultatov, če obstajajo v seji
+if 'df_rezultati' in st.session_state:
+    df = st.session_state['df_rezultati']
+    
+    st.subheader("📊 Povzetek")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Postavk na računu", len(df))
+    c2.metric("Brez opozoril", (df['Opozorila'] == 'OK').sum())
+    c3.metric("Z opozorili", (df['Opozorila'] != 'OK').sum())
+    c4.metric("Manjkajoče postavke", df['Opozorila'].str.contains('NI V', na=False).sum())
+
+    st.subheader("📋 Primerjalna tabela")
+    st.info("💡 Namig: V stolpcu **'Kol. naročilo'** lahko ročno popravite količino. Aplikacija bo samodejno preračunala znesek in posodobila opozorila.")
+    
+    # Uporabimo data_editor za interaktivno urejanje
+    edited_df = st.data_editor(
+        df,
+        column_config={
+            "Ident": st.column_config.TextColumn("Ident", disabled=True),
+            "Naziv": st.column_config.TextColumn("Naziv", width="large", disabled=True),
+            "Kol. račun": st.column_config.NumberColumn("Kol. račun", format="%.2f", disabled=True),
+            "Kol. prevzem": st.column_config.NumberColumn("Kol. prevzem", format="%.2f", disabled=True),
+            "Kol. naročilo": st.column_config.NumberColumn("Kol. naročilo", format="%.2f", step=1.0),
+            "Cena račun": st.column_config.NumberColumn("Cena račun", format="%.4f", disabled=True),
+            "Cena naročilo": st.column_config.NumberColumn("Cena naročilo", format="%.4f", disabled=True),
+            "Znesek račun": st.column_config.NumberColumn("Znesek račun", format="%.2f", disabled=True),
+            "Znesek naročilo": st.column_config.NumberColumn("Znesek naročilo", format="%.2f", disabled=True),
+            "Opozorila": st.column_config.TextColumn("Opozorila", width="medium", disabled=True),
+        },
+        hide_index=True,
+        use_container_width=True,
+        key="data_editor"
+    )
+
+    # Če je referent kaj spremenil, posodobimo izračune
+    if not edited_df.equals(df):
+        # Preračunamo znesek in opozorila glede na novo količino
+        for idx, row in edited_df.iterrows():
+            # Preračun zneska
+            if pd.notna(row['Kol. naročilo']) and pd.notna(row['Cena naročilo']):
+                edited_df.at[idx, 'Znesek naročilo'] = round(row['Kol. naročilo'] * row['Cena naročilo'], 2)
+            
+            # Posodobitev opozoril
+            opozorila = []
+            # Preverimo, ali je prišlo do popravka (primerjamo z originalno količino iz naročilnice, ki je bila 0.0)
+            # Za poenostavitev preprosto preverimo trenutne vrednosti
+            if pd.notna(row['Kol. račun']) and pd.notna(row['Kol. prevzem']):
+                if abs(row['Kol. račun'] - row['Kol. prevzem']) > 0.001:
+                    opozorila.append(f"KOLIČINA (račun {row['Kol. račun']} ≠ prevzem {row['Kol. prevzem']})")
+            
+            # Če je količina naročila zdaj vnesena (večja od 0) in se razlikuje od računa
+            if pd.notna(row['Kol. naročilo']) and row['Kol. naročilo'] > 0:
+                if pd.notna(row['Kol. račun']) and abs(row['Kol. račun'] - row['Kol. naročilo']) > 0.001:
+                    opozorila.append(f"KOLIČINA (račun {row['Kol. račun']} ≠ naročilo {row['Kol. naročilo']})")
+            
+            if pd.notna(row['Cena račun']) and pd.notna(row['Cena naročilo']) and row['Cena naročilo'] > 0:
+                if abs(row['Cena račun'] - row['Cena naročilo']) > 0.01:
+                    opozorila.append(f"CENA (račun {row['Cena račun']:.4f} ≠ naročilo {row['Cena naročilo']:.4f})")
+            
+            edited_df.at[idx, 'Opozorila'] = '; '.join(opozorila) if opozorila else 'OK'
+
+        # Shranimo posodobljeno tabelo nazaj v sejo
+        st.session_state['df_rezultati'] = edited_df
+        st.rerun() # Osvežimo stran, da se prikažejo novi izračuni
+
+    # Prenos CSV
+    csv = edited_df.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
+    st.download_button(
+        label="⬇️ Prenesi rezultat (CSV)",
+        data=csv,
+        file_name="primerjava_racuna.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+
+# Prikaz zgodovine
+st.markdown("---")
+st.subheader("🕒 Zgodovina primerjav")
+if st.session_state['zgodovina']:
+    st.dataframe(pd.DataFrame(st.session_state['zgodovina']), use_container_width=True, hide_index=True)
+    if st.button("Počisti zgodovino"):
+        st.session_state['zgodovina'] = []
+        st.rerun()
+else:
+    st.write("Zgodovina je prazna. Zaženite primerjavo, da se zabeleži.")
