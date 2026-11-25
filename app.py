@@ -6,6 +6,7 @@ import re
 import io
 import pdfplumber
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 
 # ---------------------------------------------------------------------------
 # 1. POMOŽNE FUNKCIJE
@@ -15,6 +16,11 @@ def _f(vrednost, privzeto=0.0):
     vrednost = str(vrednost).strip().replace(' ', '').replace(',', '.')
     try: return float(vrednost)
     except ValueError: return privzeto
+
+def zaokrozi_na_dve(vrednost):
+    """Klasično matematično zaokroževanje na 2 decimalki (11.915 -> 11.92)"""
+    if pd.isna(vrednost): return 0.0
+    return float(Decimal(str(vrednost)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
 
 def normaliziraj_naziv(n):
     if not n: return ""
@@ -40,19 +46,6 @@ def poisci_po_imenu(ciljni_naziv, slovar_postavk):
             najvec_besed = len(kljucne_ujemajoce)
             najboljse_ujemanje = v
     return najboljse_ujemanje if najvec_besed >= 1 else None
-
-def pretvori_v_osnovno_enoto(kolicina, enota, naziv):
-    if pd.isna(kolicina): return 0.0, "KOS"
-    enota = str(enota).upper()
-    # H87 je standardna koda za "kos" v eRačunih, a v farmaciji pogosto pomeni škatlico (SC)
-    if enota in ['SC', 'ŠK', 'SK', 'H87']:
-        m = re.search(r'(?:sc|šk)\s*=\s*(\d+)\s*kos', str(naziv), re.IGNORECASE)
-        if m:
-            faktor = float(m.group(1))
-            return kolicina * faktor, "KOS"
-        else:
-            return kolicina, "SC" # Če ni faktorja, naj ostane SC
-    return kolicina, enota
 
 # ---------------------------------------------------------------------------
 # 2. BRANJE DATOTEK
@@ -82,9 +75,7 @@ def preberi_eracun(stream):
         if qty is not None:
             kolicina = _f(qty.findtext('eslog:D_6060', default='0', namespaces=ns))
             enota = qty.findtext('eslog:D_6411', default='KOS', namespaces=ns)
-            if enota == 'H87': 
-                if 'sc=' in naziv.lower(): enota = 'SC'
-                else: enota = 'KOS'
+            if enota == 'H87': enota = 'KOS' # Samo pretvorba kode, brez logike
 
         cena_brez = cena_z = 0.0
         for pri in sg26.findall('eslog:G_SG29/eslog:S_PRI/eslog:C_C509', ns):
@@ -192,15 +183,22 @@ def preberi_narocilnico(stream):
 # ---------------------------------------------------------------------------
 def izracunaj_opozorila(racun_kol, prevzem_kol, racun_cena, narocilo_cena, racun_znesek, narocilo_znesek):
     opozorila = []
+    
+    # Primerjava količin
     if pd.notna(racun_kol) and pd.notna(prevzem_kol):
         if abs(racun_kol - prevzem_kol) > 0.001:
             opozorila.append(f"KOLIČINA (račun {racun_kol} ≠ prevzem {prevzem_kol})")
+            
+    # Primerjava cen
     if pd.notna(racun_cena) and pd.notna(narocilo_cena) and narocilo_cena > 0:
-        if round(racun_cena, 4) != round(narocilo_cena, 4):
+        if abs(racun_cena - narocilo_cena) > 0.0001:
             opozorila.append(f"CENA (račun {racun_cena:.4f} ≠ naročilo {narocilo_cena:.4f})")
+            
+    # Primerjava zneskov (zdaj strogo primerjamo zaokroženi vrednosti)
     if pd.notna(racun_znesek) and pd.notna(narocilo_znesek) and narocilo_znesek > 0:
-        if round(racun_znesek, 2) != round(narocilo_znesek, 2):
+        if zaokrozi_na_dve(racun_znesek) != zaokrozi_na_dve(narocilo_znesek):
             opozorila.append(f"ZNESEK (račun {racun_znesek:.2f} ≠ naročilo {narocilo_znesek:.2f})")
+            
     return '; '.join(opozorila) if opozorila else 'OK'
 
 def primerjaj(eracun, prevzemnica, narocilnica):
@@ -215,18 +213,14 @@ def primerjaj(eracun, prevzemnica, narocilnica):
         if p and p['sifra']: ident = p['sifra']
         elif n and n['sifra']: ident = n['sifra']
 
-        # Pretvorba količin (sedaj H87 pravilno prepozna SC, če je v nazivu sc=)
-        kol_r, enota_r = pretvori_v_osnovno_enoto(e['kolicina'], e['enota'], e['naziv'])
-        kol_p, enota_p = pretvori_v_osnovno_enoto(p['kolicina'] if p else 0.0, p['enota'] if p else '', p['naziv'] if p else '')
-        kol_n, enota_n = pretvori_v_osnovno_enoto(n['kolicina'] if n else 0.0, n['enota'] if n else '', n['naziv'] if n else '')
+        kol_r = e['kolicina']
+        kol_p = p['kolicina'] if p else 0.0
+        kol_n = n['kolicina'] if n else 0.0
 
         cena_n = n['cena'] if n else 0.0
-        if n and n['enota'] in ['SC', 'ŠK']:
-            m = re.search(r'(?:sc|šk)\s*=\s*(\d+)\s*kos', n['naziv'], re.IGNORECASE)
-            if m: cena_n = cena_n / float(m.group(1))
-
+        
+        # Znesek naročila izračunamo iz prejete količine in cene iz naročilnice
         osnova_za_znesek = kol_p if p else 0.0
-        # Uporabimo polno natančnost cene (nezaokroženo), nato zaokrožimo končni znesek
         znesek_n = round(osnova_za_znesek * cena_n, 2)
         
         opozorila = izracunaj_opozorila(kol_r, kol_p, e['cena_brez'], cena_n, e['znesek_brez'], znesek_n)
@@ -235,7 +229,7 @@ def primerjaj(eracun, prevzemnica, narocilnica):
             'Ident': ident, 
             'Šifra dob.': e['sifra_sa'],
             'Naziv': e['naziv'],
-            'Em račun': enota_r,
+            'Em račun': e['enota'],
             'Kol. račun': round(kol_r, 2), 
             'Em prevzem': p['enota'] if p else '',
             'Kol. prevzem': round(kol_p, 2) if p else None, 
