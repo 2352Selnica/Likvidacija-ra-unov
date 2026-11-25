@@ -11,13 +11,10 @@ from datetime import datetime
 # 1. POMOŽNE FUNKCIJE
 # ---------------------------------------------------------------------------
 def _f(vrednost, privzeto=0.0):
-    if vrednost is None:
-        return privzeto
+    if vrednost is None: return privzeto
     vrednost = str(vrednost).strip().replace(' ', '').replace(',', '.')
-    try:
-        return float(vrednost)
-    except ValueError:
-        return privzeto
+    try: return float(vrednost)
+    except ValueError: return privzeto
 
 def normaliziraj_naziv(n):
     if not n: return ""
@@ -47,11 +44,14 @@ def poisci_po_imenu(ciljni_naziv, slovar_postavk):
 def pretvori_v_osnovno_enoto(kolicina, enota, naziv):
     if pd.isna(kolicina): return 0.0, "KOS"
     enota = str(enota).upper()
-    if enota in ['SC', 'ŠK', 'SK']:
+    # H87 je standardna koda za "kos" v eRačunih, a v farmaciji pogosto pomeni škatlico (SC)
+    if enota in ['SC', 'ŠK', 'SK', 'H87']:
         m = re.search(r'(?:sc|šk)\s*=\s*(\d+)\s*kos', str(naziv), re.IGNORECASE)
         if m:
             faktor = float(m.group(1))
             return kolicina * faktor, "KOS"
+        else:
+            return kolicina, "SC" # Če ni faktorja, naj ostane SC
     return kolicina, enota
 
 # ---------------------------------------------------------------------------
@@ -215,6 +215,7 @@ def primerjaj(eracun, prevzemnica, narocilnica):
         if p and p['sifra']: ident = p['sifra']
         elif n and n['sifra']: ident = n['sifra']
 
+        # Pretvorba količin (sedaj H87 pravilno prepozna SC, če je v nazivu sc=)
         kol_r, enota_r = pretvori_v_osnovno_enoto(e['kolicina'], e['enota'], e['naziv'])
         kol_p, enota_p = pretvori_v_osnovno_enoto(p['kolicina'] if p else 0.0, p['enota'] if p else '', p['naziv'] if p else '')
         kol_n, enota_n = pretvori_v_osnovno_enoto(n['kolicina'] if n else 0.0, n['enota'] if n else '', n['naziv'] if n else '')
@@ -225,6 +226,7 @@ def primerjaj(eracun, prevzemnica, narocilnica):
             if m: cena_n = cena_n / float(m.group(1))
 
         osnova_za_znesek = kol_p if p else 0.0
+        # Uporabimo polno natančnost cene (nezaokroženo), nato zaokrožimo končni znesek
         znesek_n = round(osnova_za_znesek * cena_n, 2)
         
         opozorila = izracunaj_opozorila(kol_r, kol_p, e['cena_brez'], cena_n, e['znesek_brez'], znesek_n)
@@ -233,7 +235,7 @@ def primerjaj(eracun, prevzemnica, narocilnica):
             'Ident': ident, 
             'Šifra dob.': e['sifra_sa'],
             'Naziv': e['naziv'],
-            'Em račun': e['enota'],
+            'Em račun': enota_r,
             'Kol. račun': round(kol_r, 2), 
             'Em prevzem': p['enota'] if p else '',
             'Kol. prevzem': round(kol_p, 2) if p else None, 
@@ -366,18 +368,13 @@ if 'df_rezultati' in st.session_state:
     col_s1.metric("Skupaj račun (brez DDV)", f"{skupaj_racun:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
     col_s2.metric("Skupaj naročilo (brez DDV)", f"{skupaj_narocilo:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'))
 
-    # Varen izvoz v CSV - brez trdega nastavljanja imen stolpcev
     df_export = edited_df.copy()
-    
-    # Preimenujemo samo tiste stolpce, ki jih res želimo preimenovati
     df_export = df_export.rename(columns={
         'Cena račun': 'Cena račun (EUR)', 
         'Cena naročilo': 'Cena naročilo (EUR)', 
         'Znesek račun': 'Znesek račun (EUR)', 
         'Znesek naročilo': 'Znesek naročilo (EUR)'
     })
-    
-    # Odstranimo stolpce, ki jih v izvozu ne želimo
     df_export = df_export.drop(columns=['Em račun', 'Em prevzem', 'Em naročilo', 'Šifra dob.'], errors='ignore')
     
     csv = df_export.to_csv(index=False, sep=';', decimal=',', encoding='utf-8-sig').encode('utf-8-sig')
